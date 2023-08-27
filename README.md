@@ -6,7 +6,7 @@ Can be downloded from [here](https://drive.google.com/file/d/1E7mOGjd1EgvVvtQoaK
 [The link for English guide (it is not translated now)](https://docs.google.com/document/d/1Lo73gb3iCe9qqDbr8DdoSu4WIT66udAz4M9u5-wYxBU/view)  
 [The link for Russian guide](https://docs.google.com/document/d/1ozAsoaBGG-cnSGDgR5OzWqoLuq4lbAkMqXDMkY7gxOw/view)  
 
-# Was created with 
+# Was created using
 [NAudio](https://github.com/naudio/NAudio)  
 [WPFDarkTheme](https://github.com/AngryCarrot789/WPFDarkTheme)  
 [WPFCustomMessageBox](https://github.com/evanwon/WPFCustomMessageBox)  
