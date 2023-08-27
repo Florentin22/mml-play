@@ -12,3 +12,5 @@ Can be downloded from [here](https://drive.google.com/file/d/1E7mOGjd1EgvVvtQoaK
 [WPFCustomMessageBox](https://github.com/evanwon/WPFCustomMessageBox)  
 [WpfColorFont](https://github.com/sskodje/WpfColorFont)  
 [icons8](https://icons8.com/)  
+English names of instrumens is based on [this](https://github.com/kernighan/3mle-instruments/)  
+Russian names of instrumens is based on [this](https://docs.google.com/document/d/1Zx_zlWr80_XOzYQDjl6bW0wAQlnVP0bdO8Kg3p8SzjY/edit)  
