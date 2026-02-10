@@ -1,0 +1,64 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>False</UseWindowsForms>
+    <ApplicationIcon>Resources\Images\update.ico</ApplicationIcon>
+    <SignAssembly>False</SignAssembly>
+    <Title>MML Play Installer</Title>
+    <Authors>Florentin22</Authors>
+    <Version>1.0.1</Version>
+    <Company>Peter Nasilevskii</Company>
+    <Product>MML Play Installer</Product>
+    <Copyright>Peter Nasilevskii ©  2026</Copyright>
+    <PackageIcon>update.png</PackageIcon>
+    <Description>MML Play Installer Updater</Description>
+    <AssemblyTitle>MML Play Installer Updater</AssemblyTitle>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+    <FileAlignment>1024</FileAlignment>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <CheckForOverflowUnderflow>False</CheckForOverflowUnderflow>
+    <FileAlignment>1024</FileAlignment>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="close.png" />
+    <None Remove="refresh.png" />
+    <None Remove="update.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Resources\Images\update.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="close.png" />
+    <Resource Include="refresh.png" />
+    <Resource Include="update.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Update="Properties\Resources.resx">
+      <Generator></Generator>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Resources\Images\update.png">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+  </ItemGroup>
+
+  <!-- Resource pages are included implicitly by SDK; do not redeclare to avoid duplication -->
+
+</Project>
