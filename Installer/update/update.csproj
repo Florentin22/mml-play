@@ -31,6 +31,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Utils\VersionUtils.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Remove="close.png" />
     <None Remove="refresh.png" />
     <None Remove="update.png" />

@@ -12,36 +12,28 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
-using update.Models;
+using System.Windows.Media.TextFormatting;
+using update.Utils;
 namespace update
 {
     public partial class MainWindow : Window
     {
-        ObservableCollection<Models.ReleaseInfo> releases = new();
+        ReleaseService releasesService = new ReleaseService();
         readonly Queue<DateTime> refreshTimestamps = new();
-        HttpClient http;
-        Version installedVersionCache = null;
-        bool isInstalledCache = false;
-        string installPath = string.Empty;
-        string ExePath = Environment.ProcessPath!;
         string[] args = Environment.GetCommandLineArgs();
-        string DirPath;
         const string ProgramExeName = "MML Play.exe";
-        string repo = "Florentin22/mml-play";
 
         public MainWindow()
         {
             InitializeComponent();
-            ReleasesListBox.ItemsSource = releases;
+            ReleasesListBox.ItemsSource = releasesService.releases;
             try { ReleasesListBox.SelectionChanged += ReleasesListBox_SelectionChanged; } catch { }
-            http = new HttpClient();
-            try { http.DefaultRequestHeaders.Add("User-Agent", "updater"); } catch { }
+            releasesService.InstallerPath = new FilePath(Environment.ProcessPath);
+            releasesService.AppPath = new FilePath(releasesService.InstallerPath.DirectoryPath, ProgramExeName);
+            InstallPathText.Text = releasesService.InstallerPath.DirectoryPath;
             ApplySystemLanguage();
-            DirPath = Path.GetDirectoryName(ExePath) ?? "";
-            installPath = DirPath;
-            InstallPathText.Text = installPath;
             CheckVersion();
-            try { IncludePrereleaseCheck.IsChecked = (installedVersionCache != null && VersionUtils.IsPrerelease(installedVersionCache)); } catch { }
+            try { IncludePrereleaseCheck.IsChecked = (releasesService.AppVersion != null && ReleaseService.IsPrerelease(releasesService.AppVersion)); } catch { }
             StatusText.Text = GetString("Wait");
             SetupCollectionViewFilter();
             _ = Task.Run(async () =>
@@ -60,17 +52,11 @@ namespace update
         {
             try
             {
-                var installer = GetLatestInstaller();
+                var installer = releasesService.GetLatestInstaller();
                 if (installer == null) return;
-                if (!VersionUtils.IsGreaterThan(installer.Version, VersionUtils.GetVersion(ExePath)))
-                    return;
                 await Install(installer);
 
-                var fileName = installer.AssetNames.FirstOrDefault();
-                var path = Path.Combine(installPath, fileName);
-                string exePath = ExePath;
-
-                CreateAndRunUpdaterBatch(exePath, path);
+                CreateAndRunUpdaterBatch(releasesService.InstallerPath.FullPath, installer.AssetNames.FirstOrDefault());
 
                 await Dispatcher.InvokeAsync(() => { System.Windows.Application.Current.Shutdown(); });
             }
@@ -93,15 +79,10 @@ namespace update
                 timeout /t 1 /nobreak >nul
                 goto waitLoop
             )
-            rem удаляем старый инсталлер
             del /f /q ""{currentInstallerPath}""
-            rem распаковываем архив в папку инсталлятора
             powershell -Command ""Expand-Archive -Force '{downloadedArchivePath}' '{Path.GetDirectoryName(currentInstallerPath)}'""
-            rem удаляем архив обновления
             del /f /q ""{downloadedArchivePath}""
-            rem запускаем новый инсталлятор
             start """" ""{currentInstallerPath}"" {argsString}
-            rem удаляем сам батник
             del /f /q ""%~f0""
             ";
 
@@ -125,13 +106,14 @@ namespace update
             else
                 LanguageComboBox.SelectedItem = LanguageComboBoxEn;
         }
+
         async Task DownloadAndInstallFileAsync(string url, string name, long size, string tag, ReleaseKind releaseKind)
         {
             try
             {
                 var fileName = name ?? System.IO.Path.GetFileName(new Uri(url).LocalPath);
-                if (!Directory.Exists(installPath)) Directory.CreateDirectory(installPath);
-                var targetFile = System.IO.Path.Combine(installPath, fileName);
+                if (!releasesService.AppPath.DirectoryExists) Directory.CreateDirectory(releasesService.AppPath.DirectoryPath);
+                var targetFile = System.IO.Path.Combine(releasesService.AppPath.DirectoryPath, fileName);
                 var tempDownload = targetFile + ".download";
 
                 await Dispatcher.InvokeAsync(() =>
@@ -140,7 +122,7 @@ namespace update
                     DownloadProgress.Visibility = Visibility.Visible;
                 });
 
-                using (var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+                using (var resp = await GitHubReleaseService.Client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
                 {
                     resp.EnsureSuccessStatusCode();
                     var contentLength = resp.Content.Headers.ContentLength ?? size;
@@ -168,16 +150,13 @@ namespace update
                 if (releaseKind == ReleaseKind.App)
                     if (targetFile.EndsWith(".zip", System.StringComparison.OrdinalIgnoreCase))
                     {
-                        await Task.Run(() => ExtractZipFlatten(targetFile, installPath));
+                        await Task.Run(() => GitHubReleaseService.ExtractZipFlatten(targetFile, releasesService.AppPath.DirectoryPath));
                         try { File.Delete(targetFile); } catch { }
                     }
                     else if (targetFile.EndsWith(".tar.gz", System.StringComparison.OrdinalIgnoreCase) || targetFile.EndsWith(".tgz", System.StringComparison.OrdinalIgnoreCase))
                     {
-                        // tarballs are not extracted by this updater; remove archive to avoid leaving temp files
                         try { File.Delete(targetFile); } catch { }
                     }
-                await Dispatcher.InvokeAsync(() => StatusText.Text = GetString("Installed") + " " + tag);
-
             }
             catch (Exception ex)
             {
@@ -196,6 +175,7 @@ namespace update
             {
                 await Update();
                 await RunApp();
+                await Dispatcher.InvokeAsync(() => { System.Windows.Application.Current.Shutdown(); });
             }
         }
 
@@ -227,97 +207,19 @@ namespace update
             await Dispatcher.InvokeAsync(() =>
             {
                 RefreshButton.IsEnabled = false;
-                releases.Clear();
+                releasesService.releases.Clear();
             });
             try
             {
-                bool includePrerelease = false;
+                var tmp = await Task.Run(() => GitHubReleaseService.RefreshReleases());
+
                 await Dispatcher.InvokeAsync(() =>
-                    includePrerelease = IncludePrereleaseCheck.IsChecked.GetValueOrDefault());
-
-                var uri = $"https://api.github.com/repos/{repo}/releases";
-                var json = await http.GetStringAsync(uri);
-
-                var doc = JsonDocument.Parse(json);
-
-                var tmp = new List<Models.ReleaseInfo>();
-                foreach (var item in doc.RootElement.EnumerateArray())
                 {
-                    var tag = item.GetProperty("tag_name").GetString();
-                    var name = item.TryGetProperty("name", out var n) ? n.GetString() : tag;
-                    var prerelease = item.GetProperty("prerelease").GetBoolean();
-
-                    var rel = new Models.ReleaseInfo
+                    foreach (var rel in tmp)
                     {
-                        TagName = tag,
-                        Name = name,
-                        Prerelease = prerelease
-                    };
-
-                    rel.IsVisible = false;
-
-                    if (item.TryGetProperty("published_at", out var pub) &&
-                        pub.ValueKind == JsonValueKind.String &&
-                        DateTimeOffset.TryParse(pub.GetString(), out var dto))
-                    {
-                        rel.PublishedAt = dto;
+                        releasesService.releases.Add(rel);
                     }
-
-                    if (item.TryGetProperty("body", out var body) && body.ValueKind == JsonValueKind.String)
-                    {
-                        rel.Body = body.GetString();
-                    }
-
-                    if (item.TryGetProperty("assets", out var assets) && assets.GetArrayLength() > 0)
-                    {
-                        foreach (var asset in assets.EnumerateArray())
-                        {
-                            rel.AssetUrls.Add(asset.GetProperty("browser_download_url").GetString());
-                            rel.AssetNames.Add(asset.GetProperty("name").GetString());
-                            rel.AssetSizes.Add(asset.TryGetProperty("size", out var s) ? s.GetInt64() : 0);
-                        }
-                    }
-                    else
-                    {
-                        if (item.TryGetProperty("zipball_url", out var zb))
-                        {
-                            rel.AssetUrls.Add(zb.GetString());
-                            rel.AssetNames.Add(tag + ".zip");
-                            rel.AssetSizes.Add(0);
-                        }
-                        else if (item.TryGetProperty("tarball_url", out var tb))
-                        {
-                            rel.AssetUrls.Add(tb.GetString());
-                            rel.AssetNames.Add(tag + ".tar.gz");
-                            rel.AssetSizes.Add(0);
-                        }
-                    }
-                    tmp.Add(rel);
-                }
-
-                tmp.Sort((a, b) =>
-                {
-                    try
-                    {
-                        var va = a.Version;
-                        var vb = b.Version;
-                        if (va != null && vb != null)
-                        {
-                            var c = vb.CompareTo(va);
-                            if (c != 0) return c;
-                        }
-
-                        if (a.PublishedAt.HasValue && b.PublishedAt.HasValue)
-                            return b.PublishedAt.Value.CompareTo(a.PublishedAt.Value);
-                    }
-                    catch { }
-                    return 0;
                 });
-
-                foreach (var rel in tmp)
-                {
-                    await Dispatcher.InvokeAsync(() => releases.Add(rel));
-                }
             }
             catch (Exception ex)
             {
@@ -339,7 +241,7 @@ namespace update
             if (view == null) return;
             view.Filter = obj =>
             {
-                if (obj is not Models.ReleaseInfo r)
+                if (obj is not ReleaseInfo r)
                     return false;
 
                 if (!r.IsVisible)
@@ -367,7 +269,7 @@ namespace update
 
         private void UpdateReleaseDetails()
         {
-            var rel = ReleasesListBox.SelectedItem as Models.ReleaseInfo;
+            var rel = ReleasesListBox.SelectedItem as ReleaseInfo;
             var title = this.FindName("ReleaseTitleText") as TextBlock;
             var tag = this.FindName("ReleaseTagText") as TextBlock;
             var pre = this.FindName("ReleasePrereleaseText") as TextBlock;
@@ -425,13 +327,13 @@ namespace update
             var folderDialog = new OpenFolderDialog
             {
                 Title = GetString("SelectFolderTitle"),
-                InitialDirectory = DirPath
+                InitialDirectory = releasesService.InstallerPath.DirectoryPath
             };
 
             if (folderDialog.ShowDialog() == true)
             {
-                installPath = folderDialog.FolderName;
-                InstallPathText.Text = installPath;
+                releasesService.AppPath.FilePathWrite(folderDialog.FolderName);
+                InstallPathText.Text = releasesService.AppPath.DirectoryPath;
                 CheckVersion();
             }
         }
@@ -447,13 +349,13 @@ namespace update
             {
                 if (selectedRelease == null)
                 {
-                    selectedRelease = ReleasesListBox.SelectedItem as Models.ReleaseInfo;
+                    selectedRelease = ReleasesListBox.SelectedItem as ReleaseInfo;
                     if (selectedRelease == null)
                     {
                         StatusText.Text = GetString("SelectReleaseFirst");
                         return;
                     }
-                    if (string.IsNullOrEmpty(installPath))
+                    if (string.IsNullOrEmpty(releasesService.AppPath.FullPath))
                     {
                         StatusText.Text = GetString("ChooseInstallPathFirst");
                         return;
@@ -504,6 +406,7 @@ namespace update
                         SearchBox.IsEnabled = true;
                         DownloadProgress.Visibility = Visibility.Collapsed;
                         ProgressLabel.Text = string.Empty;
+                        StatusText.Text = $"{GetString("Installed")}: {selectedRelease.TagName}";
                         CheckVersion();
                     });
                 }
@@ -536,19 +439,16 @@ namespace update
 
         private bool CheckVersion()
         {
-            installedVersionCache = null;
-            isInstalledCache = false;
-
-            if (string.IsNullOrEmpty(installPath))
+            if (!releasesService.AppPath.DirectoryExists)
             {
                 StatusText.Text = GetString("ChooseInstallPathFirst");
                 UpdatePanel();
                 return false;
             }
 
-            string exe = Path.Combine(installPath, ProgramExeName);
+            releasesService.AppPath.FilePathWrite(Path.Combine(releasesService.AppPath.DirectoryPath, ProgramExeName));
 
-            if (!File.Exists(exe))
+            if (!releasesService.AppPath.FileExists)
             {
                 UpdatePanel();
                 return false;
@@ -556,10 +456,8 @@ namespace update
 
             try
             {
-                installedVersionCache = VersionUtils.GetVersion(exe);
-                isInstalledCache = installedVersionCache != null;
                 UpdatePanel();
-                return isInstalledCache;
+                return true;
             }
             catch (Exception ex)
             {
@@ -578,30 +476,23 @@ namespace update
                     try
                     {
                         var includePrerelease = IncludePrereleaseCheck.IsChecked.GetValueOrDefault();
-                        var isInstalled = isInstalledCache;
-                        var installedVersion = installedVersionCache;
-                        var prereleaseInstalled = VersionUtils.IsPrerelease(installedVersion);
+                        var prereleaseInstalled = ReleaseService.IsPrerelease(releasesService.AppVersion);
 
-                        // ---- versions ----
-                        // если версия актуальна → функции вернут null
-                        var latestRelease = GetRelease();
-                        var latestPrerelease = includePrerelease ? GetPrerelease() : null;
+                        var latestRelease = releasesService.GetRelease();
+                        var latestPrerelease = includePrerelease ? releasesService.GetPrerelease() : null;
                         ReleaseInfo? availableUpdate = (latestRelease == null && prereleaseInstalled) ? latestPrerelease : latestRelease;
                         bool updateAvailable = availableUpdate != null;
 
-                        // ---- Installed text ----
                         InstalledVersionText.Text =
-                            isInstalled
-                                ? VersionUtils.FormatVersionAsTag(installedVersion) ?? "—"
+                            releasesService.AppPath.FileExists
+                                ? ReleaseService.FormatVersionAsTag(releasesService.AppVersion) ?? "—"
                                 : GetString("InstalledNot");
 
-                        // ---- Available RELEASE (показываем даже если не установлено) ----
                         AvailableVersionText.Text =
                             latestRelease != null
                                 ? latestRelease.TagName
                                 : "—";
 
-                        // ---- Prerelease panel ----
                         if (includePrerelease && latestPrerelease != null)
                         {
                             LatestPrereleasePanel.Visibility = Visibility.Visible;
@@ -612,29 +503,22 @@ namespace update
                             LatestPrereleasePanel.Visibility = Visibility.Collapsed;
                         }
 
-                        // ================= BUTTONS =================
-
-                        if (isInstalled)
+                        if (releasesService.AppPath.FileExists)
                         {
-                            // базовые кнопки
                             RunButton.Visibility = Visibility.Visible;
                             DeleteButton.Visibility = Visibility.Visible;
                             NoSelInstallButton.Visibility = Visibility.Collapsed;
 
-                            // UPDATE — если GetRelease() != null
                             UpdateButton.Visibility =
                                 updateAvailable ? Visibility.Visible : Visibility.Collapsed;
 
-                            // info text
                             NoSelectionInfoText.Text = updateAvailable
-                                ? $"{GetString("Installed")}: {VersionUtils.FormatVersionAsTag(installedVersion)} — {availableUpdate.TagName} {GetString("Available")}"
-                                : $"{GetString("Installed")}: {VersionUtils.FormatVersionAsTag(installedVersion)}";
+                                ? $"{GetString("Installed")}: {ReleaseService.FormatVersionAsTag(releasesService.AppVersion)} — {availableUpdate.TagName} {GetString("Available")}"
+                                : $"{GetString("Installed")}: {ReleaseService.FormatVersionAsTag(releasesService.AppVersion)}";
 
-                            // rollback (если установлен prerelease)
                             RollbackToReleaseButton.Visibility =
                                 prereleaseInstalled ? Visibility.Visible : Visibility.Collapsed;
 
-                            // switch to prerelease — если есть prerelease новее
                             SwitchToPrereleaseButton.Visibility =
                                 (!prereleaseInstalled && latestPrerelease != null)
                                     ? Visibility.Visible
@@ -642,14 +526,12 @@ namespace update
                         }
                         else
                         {
-                            // НЕ установлено
                             RunButton.Visibility = Visibility.Collapsed;
                             DeleteButton.Visibility = Visibility.Collapsed;
                             UpdateButton.Visibility = Visibility.Collapsed;
                             RollbackToReleaseButton.Visibility = Visibility.Collapsed;
                             SwitchToPrereleaseButton.Visibility = Visibility.Collapsed;
 
-                            // INSTALL — если есть хоть что-то доступное
                             NoSelInstallButton.Visibility =
                                 (latestRelease != null || latestPrerelease != null)
                                     ? Visibility.Visible
@@ -660,7 +542,7 @@ namespace update
                     }
                     catch (Exception ex)
                     {
-                        StatusText.Text = $"{GetString("Error")}: {ex.Message}";
+                        StatusText.Text = $"{GetString("Error")}: {ex.Message},  {ex.StackTrace}";
                     }
                 });
             }
@@ -677,26 +559,6 @@ namespace update
             catch { return key; }
         }
 
-        void ExtractZipFlatten(string zipPath, string destDir)
-        {
-            try
-            {
-                using var archive = System.IO.Compression.ZipFile.OpenRead(zipPath);
-                foreach (var entry in archive.Entries)
-                {
-                    if (string.IsNullOrEmpty(entry.Name)) continue;
-                    var dest = System.IO.Path.Combine(destDir, entry.Name);
-                    try
-                    {
-                        if (File.Exists(dest)) File.Delete(dest);
-                        entry.ExtractToFile(dest, true);
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-        }
-
         private void IncludePrereleaseCheck_Unchecked(object sender, RoutedEventArgs e)
         {
             RefreshList();
@@ -710,7 +572,7 @@ namespace update
         private void RefreshList()
         {
             var includePrerelease = IncludePrereleaseCheck.IsChecked.GetValueOrDefault();
-            foreach (var r in releases)
+            foreach (var r in releasesService.releases)
             {
                 r.IsVisible = r.releaseKind == ReleaseKind.App && (includePrerelease || !r.Prerelease);
             }
@@ -722,8 +584,7 @@ namespace update
         {
             try
             {
-                var exePath = System.IO.Path.Combine(installPath, ProgramExeName);
-                ProcessStartInfo startInfo = new ProcessStartInfo(exePath);
+                ProcessStartInfo startInfo = new ProcessStartInfo(releasesService.AppPath.FullPath);
                 startInfo.WorkingDirectory = System.IO.Path.GetDirectoryName(startInfo.FileName);
                 startInfo.Arguments = "updated";
                 Process.Start(startInfo);
@@ -749,8 +610,7 @@ namespace update
         {
             try
             {
-                var exe = System.IO.Path.Combine(installPath, ProgramExeName);
-                if (File.Exists(exe)) File.Delete(exe);
+                if (releasesService.AppPath.FileExists) File.Delete(releasesService.AppPath.FullPath);
                 StatusText.Text = GetString("InstalledNot");
                 CheckVersion();
             }
@@ -770,14 +630,10 @@ namespace update
             ReleaseInfo? candidate = null;
             await Dispatcher.InvokeAsync(() =>
             {
-                candidate = releases.FirstOrDefault(r => IncludePrereleaseCheck.IsChecked.GetValueOrDefault() || !r.Prerelease);
-                if (candidate == null)
-                {
-                    StatusText.Text = GetString("ReleaseNotFound");
-                    return;
-                }
+                candidate = IncludePrereleaseCheck.IsChecked.GetValueOrDefault(false) && ReleaseService.IsPrerelease(releasesService.AppVersion) ? releasesService.GetAnyUpdate() : releasesService.GetRelease();
+                if (ReleaseNotFound(candidate)) return;
             });
-            _ = Task.Run(async () =>
+            await Task.Run(async () =>
             {
                 await Install(candidate);
             });
@@ -785,7 +641,7 @@ namespace update
 
         private void Update_Click(object sender, RoutedEventArgs e)
         {
-            if (VersionUtils.IsPrerelease(installedVersionCache))
+            if (ReleaseService.IsPrerelease(releasesService.AppVersion))
                 Update();
             else
                 InstallLatestRelease();
@@ -803,42 +659,27 @@ namespace update
 
         private void InstallLatestRelease()
         {
-            var latest = GetLatestRelease();
-            if (latest == null)
-            {
-                StatusText.Text = GetString("ReleaseNotFound");
-                return;
-            }
+            var latest = releasesService.GetLatestRelease();
+            if (ReleaseNotFound(latest)) return;
             Install(latest);
         }
 
         private void SwitchToPrereleaseButton_Click(object sender, RoutedEventArgs e)
         {
-            var prerelease = GetPrerelease();
-            if (prerelease == null)
-            {
-                StatusText.Text = GetString("ReleaseNotFound");
-                return;
-            }
+            var prerelease = releasesService.GetPrerelease();
+            if (ReleaseNotFound(prerelease)) return;
             Install(prerelease);
         }
 
-        private ReleaseInfo? GetPrerelease()
+        private bool ReleaseNotFound(ReleaseInfo releaseInfo)
         {
-            return releases.Where(r => r.Prerelease && VersionUtils.IsGreaterThan(r.Version, installedVersionCache)).OrderByDescending(r => r.Version).FirstOrDefault();
+            if (releaseInfo == null)
+            {
+                StatusText.Text = GetString("ReleaseNotFound");
+                return true;
+            }
+            return false;
         }
 
-        private ReleaseInfo? GetRelease()
-        {
-            return releases.Where(r => !r.Prerelease && VersionUtils.IsGreaterThan(r.Version, installedVersionCache)).OrderByDescending(r => r.Version).FirstOrDefault();
-        }
-        private ReleaseInfo? GetLatestRelease()
-        {
-            return releases.Where(r => !r.Prerelease).OrderByDescending(r => r.Version).FirstOrDefault();
-        }
-        private ReleaseInfo? GetLatestInstaller()
-        {
-            return releases.Where(r => r.releaseKind == ReleaseKind.Installer).OrderByDescending(r => r.Version).FirstOrDefault();
-        }
     }
 }
